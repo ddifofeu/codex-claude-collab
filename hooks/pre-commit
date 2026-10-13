@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# managed-by: codex-claude-collab
+# Blocks commits only when HANDOFF.md has a malformed Lock line.
+[ -f HANDOFF.md ] && [ -x scripts/lock.sh ] || exit 0
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
+if ! scripts/lock.sh validate >"$out" 2>&1; then
+  cat "$out"
+  echo "pre-commit: fix the Lock line in HANDOFF.md before committing (or use --no-verify)."
+  exit 1
+fi
+grep WARN "$out" || true
+exit 0
