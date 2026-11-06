@@ -1,8 +1,31 @@
-# Codex + Claude Code collaboration: architecture
+# Codex + Claude Code collaboration kit
 
 This kit lets two coding agents, OpenAI Codex and Anthropic Claude Code, work on one repository in turns. You switch tools when one hits its usage limit. The next one picks up from the repository alone, with no shared memory and no conversation history.
 
 The whole design follows from one fact: **neither agent remembers anything the other did.** Each session starts cold. So everything needed to continue has to live in files both tools read, and those files have to be committed with the work.
+
+It is for one person alternating between the two tools on the same repository. It coordinates agents that cooperate; it isn't a sandbox or an access control.
+
+## Status
+
+A small kit, published as a single commit in October 2026.
+
+- **What's here:** templates, per-tool prompts, `lock.sh`, a pre-commit hook and a non-destructive installer. It needs `bash`, `python3` and `git`.
+- **Testing:** there is no automated test suite. On 2026-11-06, at commit `93d7f47` on Linux, a manual run of the installer and lock confirmed the FREE, HELD, STALE and MALFORMED states and their exit codes, and that the hook blocks a malformed Lock line and allows the corrected one.
+- **Not measured:** the repository records no figures for time, tokens or handoff success.
+
+## Quick start
+
+```bash
+/path/to/codex-claude-collab/scripts/install.sh /path/to/repo
+# merge any "EXISTS, differs" files by hand, fill in AGENTS.md placeholders
+cd /path/to/repo && git add AGENTS.md CLAUDE.md HANDOFF.md scripts/lock.sh && git commit
+scripts/lock.sh status        # FREE / HELD / STALE / MALFORMED
+scripts/lock.sh acquire codex "$(git branch --show-current)"
+scripts/lock.sh release
+```
+
+Then point each tool at its prompt in `.collab/prompts/`. The rest of this page explains how it works and where it falls short.
 
 ## 1. Architecture
 
@@ -85,11 +108,11 @@ Three rules make a cold start work:
 
 ### Pros
 
-- **Tool-neutral, plain files.** Markdown, one bash script and git. No server, daemon, API or account. Either tool, or a human, can read and edit every part.
+- **Tool-neutral, plain files.** Markdown, shell scripts with embedded Python, and git. No server, daemon or API. Either tool, or a human, can read and edit every part.
 - **Survives memory loss.** Continuity doesn't depend on either tool's memory, conversation history or summaries. Claude Code is told explicitly not to keep handoff state in its own auto-memory.
 - **Versioned and auditable.** `HANDOFF.md` changes in the same commit as the work, so `git log -p HANDOFF.md` shows who did what, what was verified, and when.
-- **Cheap on tokens.** One short live file, read once per session. The stable files are loaded automatically and rarely change.
-- **Fails safe.** Unclear states (HELD, MALFORMED, STALE, decisions marked OPEN) stop the agent and hand the decision to you instead of letting it guess.
+- **Small by design.** One short live file, read once per session. The stable files rarely change.
+- **Stops on unclear state.** Unclear states (HELD, MALFORMED, STALE, decisions marked OPEN) stop the agent and hand the decision to you instead of letting it guess.
 - **Verification is part of the record.** Work isn't Done without a recorded test result, so the next agent can trust Status or see what's unverified.
 - **Non-destructive install.** It refuses to overwrite and shows differences, so existing `AGENTS.md` and `CLAUDE.md` files are merged by you, not clobbered.
 
@@ -126,311 +149,23 @@ Checks to run on the kit after installing: `status` on a fresh file prints FREE 
 - **Paste a migration prompt when an agent is mid-branch at setup.** The other tool needs to know where live state moved and how to resolve the expected conflicts.
 - **Regenerate build outputs after a rebase rather than hand-merging them,** then amend.
 
-## 4. Full implementation
+## 4. Kit layout
 
-Layout of the kit:
+| Kit file | Installed as |
+|---|---|
+| [`template/AGENTS.md`](template/AGENTS.md) | `<repo>/AGENTS.md` |
+| [`template/CLAUDE.md`](template/CLAUDE.md) | `<repo>/CLAUDE.md` |
+| [`template/HANDOFF.md`](template/HANDOFF.md) | `<repo>/HANDOFF.md` |
+| [`scripts/lock.sh`](scripts/lock.sh) | `<repo>/scripts/lock.sh` |
+| [`prompts/codex.md`](prompts/codex.md) | `<repo>/.collab/prompts/codex.md` |
+| [`prompts/claude-code.md`](prompts/claude-code.md) | `<repo>/.collab/prompts/claude-code.md` |
+| [`hooks/pre-commit`](hooks/pre-commit) | `<repo>/.git/hooks/pre-commit` |
+| [`scripts/install.sh`](scripts/install.sh) | Run from the kit: `install.sh <repo>` |
 
-```
-codex-claude-collab/
-├── template/AGENTS.md      → <repo>/AGENTS.md
-├── template/CLAUDE.md      → <repo>/CLAUDE.md
-├── template/HANDOFF.md     → <repo>/HANDOFF.md
-├── scripts/lock.sh         → <repo>/scripts/lock.sh
-├── scripts/install.sh      (run from the kit: install.sh <repo>)
-├── prompts/codex.md        → <repo>/.collab/prompts/codex.md
-├── prompts/claude-code.md  → <repo>/.collab/prompts/claude-code.md
-└── hooks/pre-commit        → <repo>/.git/hooks/pre-commit
-```
+## How this was built
 
-Usage:
+The kit's commit carries a Claude co-author trailer, so treat the implementation as AI-assisted. It builds on the conventions the two tools already read: `AGENTS.md` for Codex and `CLAUDE.md` for Claude Code.
 
-```bash
-/path/to/codex-claude-collab/scripts/install.sh /path/to/repo
-# merge any "EXISTS, differs" files by hand, fill in AGENTS.md placeholders
-cd /path/to/repo && git add AGENTS.md CLAUDE.md HANDOFF.md scripts/lock.sh && git commit
-scripts/lock.sh status        # FREE / HELD / STALE / MALFORMED
-scripts/lock.sh acquire codex "$(git branch --show-current)"
-scripts/lock.sh release
-```
+## Licence
 
-Every file follows, verbatim.
-
-
-### `template/AGENTS.md`
-
-~~~~markdown
-# AGENTS.md — shared conventions (Codex and Claude Code)
-
-Both tools read this file. Keep it stable: conventions, commands, rules.
-Live task state goes in HANDOFF.md, never here.
-
-## Project
-<one paragraph: what this repo is and what "done" means>
-
-## Commands
-- Install: `<cmd>`
-- Test: `<cmd>`
-- Lint/typecheck: `<cmd>`
-- Build: `<cmd>`
-
-## Rules
-- Run tests after each meaningful change, not only at the end.
-- Keep diffs focused. No unrelated refactors or formatting sweeps.
-- Never mark work Done without a recorded verification result.
-- Do not edit the HANDOFF.md Lock line by hand. Use `scripts/lock.sh`.
-- Commit checkpoints as `wip: <what>`; squash them into one commit on the branch before merging
-  (the merge into main can then be a fast-forward).
-~~~~
-
-### `template/CLAUDE.md`
-
-~~~~markdown
-@AGENTS.md
-
-Claude Code specific:
-- Follow the Lock and handoff protocol in HANDOFF.md and .collab/prompts/claude-code.md.
-- Do not store handoff state in auto-memory. Live state belongs in HANDOFF.md.
-- Use /compact only at a checkpoint, after HANDOFF.md is updated.
-~~~~
-
-### `template/HANDOFF.md`
-
-~~~~markdown
-# Handoff
-
-## Lock
-ACTIVE: none
-
-## Goal
-<what we are building and the definition of done>
-
-## Status
-- Done: <bullets with commit hashes>
-- In progress: <item and exact stopping point>
-- Next: <ordered steps, with file paths and the first command to run>
-
-## Decisions
-- <decision> — <why> — <date>
-- OPEN: <question awaiting the user>
-
-## Verification
-- Last test run: <command> → <pass/fail>, <date>, <commit>
-- Known failures: <list or none>
-
-## Files touched this session
-- <path> — <what changed>
-
-## Notes for the next agent
-- <gotchas, and approaches that failed and why>
-~~~~
-
-### `prompts/codex.md`
-
-~~~~markdown
-You are working in a shared repository that Claude Code also works on. We switch
-tools when token limits are hit, so continuity depends on HANDOFF.md being accurate.
-
-## 1. Start
-1. Read AGENTS.md and HANDOFF.md.
-2. Run `git status`, `git log --oneline -10`, `git branch --show-current`.
-3. Run `scripts/lock.sh status`.
-   - Exit 1 (HELD by the other tool, recent): stop and ask me.
-   - Exit 2 (malformed): stop and ask me.
-   - Exit 0 (FREE or STALE): run `scripts/lock.sh acquire codex <branch>`. If it was
-     STALE, tell me first, and check the tree for changes the ledger does not explain.
-4. Treat the repo as the source of truth. If HANDOFF.md disagrees with git or the
-   test results, add the discrepancy to Notes and proceed from the repo state.
-5. Create a feature branch if you are not already on one.
-
-## 2. Work
-- Small, verifiable steps. Run the AGENTS.md test command after each change.
-- Checkpoint at every milestone (passing test, finished module, resolved bug): edit
-  only the changed sections of HANDOFF.md (Status, Verification, Files touched), then
-  `git add <paths>` (by name, so new files are included and nothing unrelated is),
-  then `git commit -m "wip: <what>"`. Assume the session can end at any moment.
-- Search before opening large files. Do not re-read files already in context unless
-  they changed.
-- Out-of-scope bugs go to Next or Notes. Do not fix them silently.
-- Unsure about a decision: add it to Decisions as OPEN and ask me.
-
-## 3. Hand off
-When I say "hand off", or when you sense you are near your limit:
-1. Stop starting new steps.
-2. Commit WIP, or make sure HANDOFF.md describes every uncommitted change.
-3. Rewrite Next as an ordered list the other tool can run without asking me anything.
-4. Run `scripts/lock.sh release`.
-5. Reply with three lines: done, next, and whether the tree is clean.
-~~~~
-
-### `prompts/claude-code.md`
-
-~~~~markdown
-You are working in a shared repository that Codex also works on. We switch tools
-when token limits are hit, so continuity depends on HANDOFF.md being accurate.
-CLAUDE.md imports AGENTS.md, so the conventions and commands are already loaded.
-
-## 1. Start
-1. Read HANDOFF.md.
-2. Run `git status`, `git log --oneline -10`, `git branch --show-current`.
-3. Run `scripts/lock.sh status`.
-   - Exit 1 (HELD by the other tool, recent): stop and ask me.
-   - Exit 2 (malformed): stop and ask me.
-   - Exit 0 (FREE or STALE): run `scripts/lock.sh acquire claude-code <branch>`. If it was
-     STALE, tell me first, and check the tree for changes the ledger does not explain.
-4. Treat the repo as the source of truth. If HANDOFF.md disagrees with git or the
-   test results, add the discrepancy to Notes and proceed from the repo state.
-5. Create a feature branch if you are not already on one.
-
-## 2. Work
-- Small, verifiable steps. Run the AGENTS.md test command after each change.
-- Checkpoint at every milestone: edit only the changed sections of HANDOFF.md, then
-  `git add <paths>` (by name, so new files are included and nothing unrelated is),
-  then `git commit -m "wip: <what>"`. Assume the session can end at any moment.
-- Use targeted Grep and Read with offset/limit. Avoid re-reading files already in context.
-- Out-of-scope bugs go to Next or Notes. Do not fix them silently.
-- Unsure about a decision: add it to Decisions as OPEN and ask me.
-- Use /compact only right after a checkpoint, so nothing important is lost in the summary.
-
-## 3. Hand off
-When I say "hand off", or when you sense you are near your limit:
-1. Stop starting new steps.
-2. Commit WIP, or make sure HANDOFF.md describes every uncommitted change.
-3. Rewrite Next as an ordered list the other tool can run without asking me anything.
-4. Run `scripts/lock.sh release`.
-5. Reply with three lines: done, next, and whether the tree is clean.
-~~~~
-
-### `scripts/lock.sh`
-
-~~~~bash
-#!/usr/bin/env bash
-# Lock management for the handoff ledger.
-# Usage: lock.sh status | validate | acquire <codex|claude-code> <branch> | release
-# Exit codes: 0 FREE/STALE/OK, 1 HELD, 2 MALFORMED
-# Env: LEDGER (default HANDOFF.md), STALE_HOURS (default 2)
-set -euo pipefail
-LEDGER="${LEDGER:-HANDOFF.md}"
-STALE_HOURS="${STALE_HOURS:-2}"
-cmd="${1:-status}"
-[ -f "$LEDGER" ] || { echo "MALFORMED: $LEDGER not found"; exit 2; }
-
-status() {
-  python3 - "$LEDGER" "$STALE_HOURS" <<'PY'
-import re, sys, datetime
-path, stale = sys.argv[1], float(sys.argv[2])
-line = next((l for l in open(path) if l.startswith('ACTIVE:')), None)
-if line is None:
-    print("MALFORMED: no ACTIVE line"); sys.exit(2)
-if line.startswith('ACTIVE: none'):
-    print("FREE"); sys.exit(0)
-m = re.search(r'started (\d{4}-\d{2}-\d{2} \d{2}:\d{2})', line)
-if not m:
-    print("MALFORMED: no start time in ACTIVE line"); sys.exit(2)
-started = datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M')
-age = (datetime.datetime.now() - started).total_seconds() / 3600
-if age > stale:
-    print(f"STALE ({age:.1f}h): {line.strip()}"); sys.exit(0)
-print(f"HELD ({age:.1f}h): {line.strip()}"); sys.exit(1)
-PY
-}
-
-set_active() {
-  python3 - "$LEDGER" "$1" <<'PY'
-import sys
-path, new = sys.argv[1], sys.argv[2]
-lines = open(path).read().split('\n')
-for i, l in enumerate(lines):
-    if l.startswith('ACTIVE:'):
-        lines[i] = new; break
-else:
-    sys.exit("no ACTIVE line to replace")
-with open(path, 'w') as f:
-    f.write('\n'.join(lines))
-PY
-}
-
-case "$cmd" in
-  status)
-    status ;;
-  validate)
-    rc=0; status >/dev/null 2>&1 || rc=$?
-    if [ "$rc" -eq 2 ]; then status; exit 2; fi
-    n=$(wc -l < "$LEDGER")
-    if [ "$n" -gt 150 ]; then echo "WARN: $LEDGER is $n lines; archive old entries"; fi
-    echo "OK: $LEDGER validated" ;;
-  acquire)
-    tool="${2:?tool required: codex or claude-code}"
-    branch="${3:-$(git branch --show-current 2>/dev/null || echo unknown)}"
-    rc=0; s=$(status 2>&1) || rc=$?
-    if [ "$rc" -eq 1 ]; then echo "$s"; echo "Refusing: lock held."; exit 1; fi
-    if [ "$rc" -eq 2 ]; then echo "$s"; exit 2; fi
-    set_active "ACTIVE: $tool | started $(date '+%Y-%m-%d %H:%M') | branch $branch"
-    echo "Lock acquired by $tool on $branch" ;;
-  release)
-    set_active "ACTIVE: none"
-    echo "Lock released" ;;
-  *)
-    echo "usage: lock.sh status|validate|acquire <tool> <branch>|release"; exit 2 ;;
-esac
-~~~~
-
-### `scripts/install.sh`
-
-~~~~bash
-#!/usr/bin/env bash
-# Deploys the collaboration setup into a target git repo.
-# Usage: install.sh /path/to/target-repo
-# Never overwrites existing files; reports differences instead.
-set -euo pipefail
-SRC="$(cd "$(dirname "$0")/.." && pwd)"
-T="${1:?usage: install.sh <target-repo>}"
-[ -d "$T/.git" ] || { echo "Not a git repo: $T"; exit 1; }
-
-copy_safe() { # src dst
-  if [ -e "$2" ]; then
-    if diff -q "$1" "$2" >/dev/null; then echo "unchanged: ${2#$T/}";
-    else echo "EXISTS, differs (not overwritten): ${2#$T/}"; fi
-  else
-    mkdir -p "$(dirname "$2")"; cp "$1" "$2"; echo "installed: ${2#$T/}"
-  fi
-}
-
-copy_safe "$SRC/template/AGENTS.md"  "$T/AGENTS.md"
-copy_safe "$SRC/template/CLAUDE.md"  "$T/CLAUDE.md"
-copy_safe "$SRC/template/HANDOFF.md" "$T/HANDOFF.md"
-copy_safe "$SRC/scripts/lock.sh"     "$T/scripts/lock.sh"
-chmod +x "$T/scripts/lock.sh"
-copy_safe "$SRC/prompts/codex.md"       "$T/.collab/prompts/codex.md"
-copy_safe "$SRC/prompts/claude-code.md" "$T/.collab/prompts/claude-code.md"
-
-HOOK="$T/.git/hooks/pre-commit"
-if [ -e "$HOOK" ] && ! grep -q "codex-claude-collab" "$HOOK"; then
-  echo "EXISTING pre-commit hook found; add this manually: $SRC/hooks/pre-commit"
-else
-  cp "$SRC/hooks/pre-commit" "$HOOK"; chmod +x "$HOOK"; echo "installed: .git/hooks/pre-commit"
-fi
-
-# Keep local-only collab prompts out of git status noise
-EX="$T/.git/info/exclude"; touch "$EX"
-grep -qxF ".collab/" "$EX" || echo ".collab/" >> "$EX"
-
-echo "Done. Next: review HANDOFF.md, fill in AGENTS.md commands, then commit."
-~~~~
-
-### `hooks/pre-commit`
-
-~~~~bash
-#!/usr/bin/env bash
-# managed-by: codex-claude-collab
-# Blocks commits only when HANDOFF.md has a malformed Lock line.
-[ -f HANDOFF.md ] && [ -x scripts/lock.sh ] || exit 0
-out=$(mktemp)
-trap 'rm -f "$out"' EXIT
-if ! scripts/lock.sh validate >"$out" 2>&1; then
-  cat "$out"
-  echo "pre-commit: fix the Lock line in HANDOFF.md before committing (or use --no-verify)."
-  exit 1
-fi
-grep WARN "$out" || true
-exit 0
-~~~~
+MIT, see [`LICENSE`](LICENSE).
